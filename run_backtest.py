@@ -14,6 +14,7 @@ Ví dụ:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 
@@ -24,6 +25,25 @@ from src import data as datamod
 from src.signals import prepare_signal_frame
 from src.engine import run_backtest
 from src.metrics import compute_metrics, buy_and_hold
+
+
+# ---------------------------------------------------------------------------
+# Định nghĩa 4 variant chiến lược để so sánh
+# ---------------------------------------------------------------------------
+STRATEGY_VARIANTS = [
+    {"name": "1.Base(ATR-stop)",  "use_swing_stop": False, "filter_squeeze": False, "require_double_pattern": False},
+    {"name": "2.SwingStop",       "use_swing_stop": True,  "filter_squeeze": False, "require_double_pattern": False},
+    {"name": "3.Swing+NoSqueeze", "use_swing_stop": True,  "filter_squeeze": True,  "require_double_pattern": False},
+    {"name": "4.Full(DoublePat)", "use_swing_stop": True,  "filter_squeeze": True,  "require_double_pattern": True},
+]
+
+
+def _apply_variant(cfg, v: dict) -> C.BacktestConfig:
+    c = copy.deepcopy(cfg)
+    c.risk.use_swing_stop = v["use_swing_stop"]
+    c.strategy.filter_squeeze = v["filter_squeeze"]
+    c.strategy.require_double_pattern = v["require_double_pattern"]
+    return c
 
 
 def _needed_tfs(cfg) -> list[str]:
@@ -127,10 +147,57 @@ def save_outputs(all_results: dict, cfg):
     print(f"\nĐã lưu kết quả vào ./{C.RESULTS_DIR}/")
 
 
+def run_variant_comparison(cfg, synthetic: bool, n: int):
+    """Tải signal 1 lần, chạy 4 variant engine, in bảng so sánh xác suất."""
+    print(f"\n{'=' * 96}")
+    print(f"  SO SÁNH VARIANT CHIẾN LƯỢC  (N={n})")
+    print(f"{'=' * 96}")
+
+    # Tải và tính signal frame một lần cho tất cả variant
+    all_sigs = {}
+    for symbol in cfg.symbols:
+        ohlcv = load_all_timeframes(symbol, cfg, synthetic)
+        sig = prepare_signal_frame(ohlcv, cfg)
+        sig = sig.dropna(subset=["atr", "rsi_wma"])
+        all_sigs[symbol] = sig
+
+    hdr = (f"{'Variant':<22} {'Symbol':<9} {'Win%':>6} {'Sharpe':>7} "
+           f"{'CAGR%':>7} {'MaxDD%':>7} {'N_tr':>5} {'AvgR':>6} "
+           f"{'PF':>6} {'Equity$':>10}")
+    print(hdr)
+    print("-" * 96)
+
+    rows = []
+    for v in STRATEGY_VARIANTS:
+        vcfg = _apply_variant(cfg, v)
+        vcfg.strategy.confluence_n = n
+        for symbol, sig in all_sigs.items():
+            res = run_backtest(sig, symbol, vcfg, label=v["name"])
+            m = compute_metrics(res.equity_curve, res.trades, vcfg.base_tf,
+                                vcfg.risk.initial_equity)
+            rows.append((v["name"], symbol, m, res))
+            pf = m.get("profit_factor") or 0
+            print(
+                f"{v['name']:<22} {symbol:<9}"
+                f" {m.get('win_rate_%', 0):>6.1f}"
+                f" {m.get('Sharpe', 0):>7.2f}"
+                f" {(m.get('CAGR_%') or 0):>7.1f}"
+                f" {m.get('MaxDD_%', 0):>7.1f}"
+                f" {m.get('n_trades', 0):>5}"
+                f" {m.get('avg_R', 0):>6.3f}"
+                f" {pf:>6.2f}"
+                f" {m.get('final_equity_$', 0):>10.0f}"
+            )
+    print(f"{'=' * 96}")
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--synthetic", action="store_true", help="Dùng dữ liệu giả lập (offline)")
     ap.add_argument("--n", type=int, default=None, help="Chỉ chạy 1 ngưỡng N cụ thể")
+    ap.add_argument("--no-variants", action="store_true",
+                    help="Bỏ qua so sánh variant, chỉ chạy chiến lược cơ bản")
     args = ap.parse_args()
 
     cfg = C.BacktestConfig()
@@ -140,13 +207,18 @@ def main():
     print(f"Manage TF    : {cfg.base_tf} (quản lý tăng/giảm volume)")
     print(f"Confluence   : {cfg.confluence_tfs}")
     print(f"Symbols      : {cfg.symbols}")
+    print(f"Stop Loss    : {'Swing High/Low' if cfg.risk.use_swing_stop else f'ATR×{cfg.risk.atr_stop_mult}'}")
 
     all_results = {}
     for n in ns:
         try:
+            if not args.no_variants:
+                run_variant_comparison(cfg, args.synthetic, n)
             res = run_for_n(cfg, args.synthetic, n)
         except PermissionError as e:
             print(f"\n[!] {e}\n[!] Chuyển sang dữ liệu synthetic để minh họa engine.\n")
+            if not args.no_variants:
+                run_variant_comparison(cfg, True, n)
             res = run_for_n(cfg, True, n)
         label = f"N={n}"
         all_results[label] = res

@@ -48,6 +48,7 @@ class IndicatorParams:
     ema_period: int = 9       # EMA của RSI (đường tín hiệu nhanh)
     wma_period: int = 45      # WMA của RSI (đường nền chậm)
     atr_period: int = 14      # ATR cho stop/trailing
+    swing_window: int = 10    # cửa sổ tìm đỉnh/đáy gần nhất (nến execution_tf)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,13 @@ class StrategyParams:
     reduced_weight: float = 0.5       # tỉ lệ giữ lại khi có rủi ro đảo chiều
     min_rebalance_frac: float = 0.05  # bỏ qua điều chỉnh quá nhỏ (theo base_qty)
 
+    # --- Lọc tín hiệu nâng cao ---
+    filter_squeeze: bool = False     # bỏ qua trigger khi bar trước đang kẹp giữa 2 đường
+    require_double_pattern: bool = False  # yêu cầu W/M trên RSI khung execution
+    double_pattern_window: int = 30  # số nến execution để tìm W/M
+    double_pattern_min_bounce: float = 8.0   # bounce tối thiểu giữa 2 đáy/đỉnh (RSI)
+    double_pattern_tolerance: float = 5.0    # sai lệch tối đa giữa 2 đáy/đỉnh (RSI)
+
 
 # ---------------------------------------------------------------------------
 # Tham số rủi ro & chi phí (Binance USDT-M Futures)
@@ -84,9 +92,12 @@ class StrategyParams:
 class RiskParams:
     initial_equity: float = 10_000.0
     risk_per_trade: float = 0.01      # rủi ro 1% equity / lệnh
-    atr_stop_mult: float = 2.5        # stop = entry ± 2.5*ATR
+    atr_stop_mult: float = 2.5        # stop = entry ± 2.5*ATR (dùng khi use_swing_stop=False)
     atr_trail_mult: float = 3.0       # chandelier trailing = 3*ATR
     use_trailing: bool = True
+    use_swing_stop: bool = True       # dùng đáy/đỉnh gần nhất làm stop thay vì ATR×mult
+    max_swing_atr_mult: float = 4.0   # trần khoảng cách stop (lần ATR) khi dùng swing
+    min_swing_atr_mult: float = 0.5   # sàn khoảng cách stop tối thiểu (lần ATR)
     max_leverage: float = 5.0         # trần đòn bẩy cho notional
     taker_fee: float = 0.0004         # 0.04% taker / chiều
     slippage: float = 0.0003          # 0.03% trượt giá / chiều

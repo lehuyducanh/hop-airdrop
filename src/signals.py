@@ -21,7 +21,7 @@ from .indicators import compute_rsi_stack
 
 
 def add_state_and_triggers(df: pd.DataFrame) -> pd.DataFrame:
-    """Thêm state, trigger_long, trigger_short. Yêu cầu đã có rsi/rsi_ema/rsi_wma."""
+    """Thêm state, trigger_long, trigger_short, in_squeeze, prev_in_squeeze."""
     out = df.copy()
     rsi, ema_, wma_ = out["rsi"], out["rsi_ema"], out["rsi_wma"]
 
@@ -35,6 +35,57 @@ def add_state_and_triggers(df: pd.DataFrame) -> pd.DataFrame:
     out["trigger_short"] = (
         (rsi < ema_) & (rsi < wma_) & (prev_rsi >= prev_wma)
     ).fillna(False)
+
+    # Squeeze: RSI kẹp giữa EMA9 và WMA45 (vùng nhiễu - tín hiệu yếu)
+    out["in_squeeze"] = (
+        ((rsi > ema_) & (rsi < wma_)) |
+        ((rsi < ema_) & (rsi > wma_))
+    ).fillna(False)
+    out["prev_in_squeeze"] = out["in_squeeze"].shift(1).fillna(False)
+    return out
+
+
+def _detect_double_patterns(rsi_arr: np.ndarray, window: int,
+                             min_bounce: float, tolerance: float):
+    """Phát hiện W-bottom (long setup) và M-top (short setup) trên RSI."""
+    n = len(rsi_arr)
+    dbl_bottom = np.zeros(n, dtype=bool)
+    dbl_top = np.zeros(n, dtype=bool)
+    half = window // 2
+    mid_s, mid_e = half // 2, half + half // 2
+
+    for i in range(window, n):
+        w = rsi_arr[i - window: i]   # window bars TRƯỚC nến hiện tại (no look-ahead)
+        if np.any(np.isnan(w)):
+            continue
+        first, second = w[:half], w[half:]
+        middle = w[mid_s:mid_e]
+        if len(middle) == 0:
+            continue
+
+        # Double-bottom: 2 đáy gần nhau với bounce ở giữa
+        low1, low2 = first.min(), second.min()
+        peak = middle.max()
+        if peak - max(low1, low2) >= min_bounce and abs(low2 - low1) <= tolerance:
+            dbl_bottom[i] = True
+
+        # Double-top: 2 đỉnh gần nhau với hõm ở giữa
+        high1, high2 = first.max(), second.max()
+        trough = middle.min()
+        if min(high1, high2) - trough >= min_bounce and abs(high2 - high1) <= tolerance:
+            dbl_top[i] = True
+
+    return dbl_bottom, dbl_top
+
+
+def add_double_pattern(df: pd.DataFrame, window: int, min_bounce: float,
+                       tolerance: float) -> pd.DataFrame:
+    """Thêm cột rsi_dbl_bottom / rsi_dbl_top vào DataFrame đã có cột rsi."""
+    out = df.copy()
+    rsi_arr = out["rsi"].to_numpy(dtype=float)
+    db, dt = _detect_double_patterns(rsi_arr, window, min_bounce, tolerance)
+    out["rsi_dbl_bottom"] = db
+    out["rsi_dbl_top"] = dt
     return out
 
 
@@ -44,7 +95,7 @@ def build_timeframe_signals(ohlcv: dict[str, pd.DataFrame], indicators) -> dict[
     for tf, df in ohlcv.items():
         stacked = compute_rsi_stack(
             df, indicators.rsi_period, indicators.ema_period,
-            indicators.wma_period, indicators.atr_period,
+            indicators.wma_period, indicators.atr_period, indicators.swing_window,
         )
         result[tf] = add_state_and_triggers(stacked)
     return result
@@ -98,14 +149,26 @@ def prepare_signal_frame(symbol_ohlcv: dict[str, pd.DataFrame], cfg) -> pd.DataF
     """
     tf_sig = build_timeframe_signals(symbol_ohlcv, cfg.indicators)
     base = tf_sig[cfg.base_tf]
-    exec_sig = tf_sig[cfg.execution_tf]
+
+    # Thêm double pattern cho execution_tf
+    exec_sig = add_double_pattern(
+        tf_sig[cfg.execution_tf],
+        window=cfg.strategy.double_pattern_window,
+        min_bounce=cfg.strategy.double_pattern_min_bounce,
+        tolerance=cfg.strategy.double_pattern_tolerance,
+    )
 
     # Tín hiệu execution -> nền (kèm exec_ct để phát hiện nến execution mới)
     base = align_to_base(
         base, exec_sig,
         {"trigger_long": "exec_trigger_long",
          "trigger_short": "exec_trigger_short",
-         "state": "exec_state"},
+         "state": "exec_state",
+         "prev_in_squeeze": "exec_prev_squeeze",
+         "rsi_dbl_bottom": "exec_dbl_bottom",
+         "rsi_dbl_top": "exec_dbl_top",
+         "swing_low": "exec_swing_low",
+         "swing_high": "exec_swing_high"},
         also_close_time_as="exec_ct",
     )
 
@@ -117,6 +180,9 @@ def prepare_signal_frame(symbol_ohlcv: dict[str, pd.DataFrame], cfg) -> pd.DataF
     base["exec_trigger_long"] = base["exec_trigger_long"].fillna(False).astype(bool)
     base["exec_trigger_short"] = base["exec_trigger_short"].fillna(False).astype(bool)
     base["exec_state"] = base["exec_state"].fillna(0)
+    base["exec_prev_squeeze"] = base["exec_prev_squeeze"].fillna(False).astype(bool)
+    base["exec_dbl_bottom"] = base["exec_dbl_bottom"].fillna(False).astype(bool)
+    base["exec_dbl_top"] = base["exec_dbl_top"].fillna(False).astype(bool)
 
     cols = [f"state_{tf}" for tf in cfg.confluence_tfs]
     base["confl_long"] = (base[cols] == 1).sum(axis=1)

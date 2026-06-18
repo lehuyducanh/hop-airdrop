@@ -59,15 +59,18 @@ def atr_wilder(high: pd.Series, low: pd.Series, close: pd.Series,
 
 
 def compute_rsi_stack(df: pd.DataFrame, rsi_period: int, ema_period: int,
-                      wma_period: int, atr_period: int) -> pd.DataFrame:
+                      wma_period: int, atr_period: int,
+                      swing_window: int = 10) -> pd.DataFrame:
     """
-    Tính RSI và 2 đường MA của RSI + ATR, gắn vào bản sao của df.
+    Tính RSI và 2 đường MA của RSI + ATR + swing high/low, gắn vào bản sao của df.
 
-    Trả về df mới với các cột: rsi, rsi_ema, rsi_wma, atr.
+    Trả về df mới với các cột: rsi, rsi_ema, rsi_wma, atr, swing_low, swing_high.
     """
     out = df.copy()
     out["rsi"] = rsi_wilder(out["close"], rsi_period)
     out["rsi_ema"] = ema(out["rsi"], ema_period)
     out["rsi_wma"] = wma(out["rsi"], wma_period)
     out["atr"] = atr_wilder(out["high"], out["low"], out["close"], atr_period)
+    out["swing_low"] = out["low"].rolling(swing_window, min_periods=1).min()
+    out["swing_high"] = out["high"].rolling(swing_window, min_periods=1).max()
     return out

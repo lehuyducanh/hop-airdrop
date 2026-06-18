@@ -103,17 +103,35 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
     exec_ct = df["exec_ct"].to_numpy()
     clong = df["confl_long"].to_numpy()
     cshort = df["confl_short"].to_numpy()
+    exec_prev_squeeze = df["exec_prev_squeeze"].to_numpy()
+    exec_dbl_bottom = df["exec_dbl_bottom"].to_numpy()
+    exec_dbl_top = df["exec_dbl_top"].to_numpy()
+    exec_swing_low = df["exec_swing_low"].to_numpy()
+    exec_swing_high = df["exec_swing_high"].to_numpy()
     times = df.index
 
-    pending = None       # (side, weight, reason): trạng thái mục tiêu cho nến kế tiếp
+    pending = None       # (side, weight, reason, sw_low, sw_high): trạng thái mục tiêu
     last_exec_ct = None  # close_time của nến execution gần nhất đã xử lý (edge detect)
 
     # ---- thao tác vị thế ----
-    def open_position(side, price, time_i, atr_val, weight):
+    def open_position(side, price, time_i, atr_val, weight, sw_low=np.nan, sw_high=np.nan):
         nonlocal equity
         if atr_val is None or np.isnan(atr_val) or atr_val <= 0:
             return None
-        stop_dist = risk.atr_stop_mult * atr_val
+        fill = price * (1 + risk.slippage) if side == "long" else price * (1 - risk.slippage)
+
+        # Stop distance: swing high/low hoặc ATR fallback
+        if risk.use_swing_stop and not np.isnan(sw_low) and not np.isnan(sw_high):
+            if side == "long":
+                sw_dist = max(fill - sw_low, 0.0)
+            else:
+                sw_dist = max(sw_high - fill, 0.0)
+            floor_d = risk.min_swing_atr_mult * atr_val
+            cap_d = risk.max_swing_atr_mult * atr_val
+            stop_dist = float(np.clip(sw_dist, floor_d, cap_d))
+        else:
+            stop_dist = risk.atr_stop_mult * atr_val
+
         if stop_dist <= 0:
             return None
         risk_cash = equity * risk.risk_per_trade
@@ -124,7 +142,6 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
         qty = base_qty * weight
         if qty <= 0:
             return None
-        fill = price * (1 + risk.slippage) if side == "long" else price * (1 - risk.slippage)
         fee = fill * qty * risk.taker_fee
         equity -= fee
         stop = fill - stop_dist if side == "long" else fill + stop_dist
@@ -178,7 +195,8 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
         ))
         pos = None
 
-    def reconcile(side, weight, price, time_i, atr_for_new, reason):
+    def reconcile(side, weight, price, time_i, atr_for_new, reason,
+                  sw_low=np.nan, sw_high=np.nan):
         """Đưa vị thế hiện tại về (side, weight) mục tiêu."""
         nonlocal pos
         # đổi chiều hoặc về flat -> đóng trước
@@ -186,7 +204,7 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
             close_position(price, time_i, reason)
         if side in ("long", "short"):
             if pos is None:
-                newpos = open_position(side, price, time_i, atr_for_new, weight)
+                newpos = open_position(side, price, time_i, atr_for_new, weight, sw_low, sw_high)
                 if newpos:
                     pos = newpos
             elif pos["side"] == side:
@@ -203,9 +221,10 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
 
         # 1) Khớp trạng thái mục tiêu quyết định ở nến trước, tại OPEN nến này
         if pending is not None:
-            side, weight, reason = pending
+            side, weight, reason, sw_low, sw_high = pending
             pending = None
-            reconcile(side, weight, o, times[i], atr[i - 1] if i > 0 else atr[i], reason)
+            reconcile(side, weight, o, times[i], atr[i - 1] if i > 0 else atr[i],
+                      reason, sw_low, sw_high)
 
         # 2) Quản trị vị thế đang mở: funding, trailing, stop (trong nến)
         if pos is not None:
@@ -236,12 +255,16 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
         n_req = strat.confluence_n
 
         if pos is None:
+            squeeze_ok = not strat.filter_squeeze or not exec_prev_squeeze[i]
+            dbl_ok_long = not strat.require_double_pattern or exec_dbl_bottom[i]
+            dbl_ok_short = not strat.require_double_pattern or exec_dbl_top[i]
+            sw_l, sw_h = exec_swing_low[i], exec_swing_high[i]
             if (is_new_exec and strat.allow_long and tlong[i]
-                    and clong[i] >= n_req):
-                pending = ("long", 1.0, "entry")
+                    and clong[i] >= n_req and squeeze_ok and dbl_ok_long):
+                pending = ("long", 1.0, "entry", sw_l, sw_h)
             elif (is_new_exec and strat.allow_short and tshort[i]
-                    and cshort[i] >= n_req):
-                pending = ("short", 1.0, "entry")
+                    and cshort[i] >= n_req and squeeze_ok and dbl_ok_short):
+                pending = ("short", 1.0, "entry", sw_l, sw_h)
         else:
             side = pos["side"]
             # tín hiệu execution ngược chiều (chỉ tính trên nến execution mới)
@@ -252,16 +275,18 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
                 opp = is_new_exec and strat.allow_long and tlong[i] and clong[i] >= n_req
                 exec_invalid = exec_state[i] == 1
 
+            sw_l, sw_h = exec_swing_low[i], exec_swing_high[i]
             if opp and strat.allow_flip:
-                pending = ("short" if side == "long" else "long", 1.0, "flip")
+                new_side = "short" if side == "long" else "long"
+                pending = (new_side, 1.0, "flip", sw_l, sw_h)
             elif strat.exit_on_state_flip and exec_invalid:
-                pending = ("flat", 0.0, "exec_exit")     # THOÁT HẲN do execution_tf
+                pending = ("flat", 0.0, "exec_exit", np.nan, np.nan)
             elif opp:
-                pending = ("flat", 0.0, "opp_exit")
+                pending = ("flat", 0.0, "opp_exit", np.nan, np.nan)
             else:
                 # còn trong xu hướng execution -> chỉ tăng/giảm volume theo manage_tf
                 w = _manage_weight(side, rsi[i], rsi_ema[i], strat)
-                pending = (side, w, "rebalance")
+                pending = (side, w, "rebalance", np.nan, np.nan)
 
         # 4) Mark-to-market equity tại close
         if pos is not None:
