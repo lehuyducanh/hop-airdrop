@@ -58,16 +58,18 @@ def run_for_n(cfg, synthetic: bool, n: int) -> dict:
         m = compute_metrics(res.equity_curve, res.trades, cfg.execution_tf,
                             cfg.risk.initial_equity)
         bh = buy_and_hold(sig["close"], cfg.risk.initial_equity, cfg.execution_tf)
+        m["scale_outs"] = res.n_scale_outs
+        m["scale_ins"] = res.n_scale_ins
         rows[symbol] = {"strategy": m, "buy_hold": bh}
         equity_curves[symbol] = res.equity_curve
-        rows[symbol]["_trades"] = len(res.trades)
     return {"metrics": rows, "equity": equity_curves}
 
 
 def print_report(label: str, result: dict):
     print(f"\n{'=' * 78}\n  KẾT QUẢ {label}\n{'=' * 78}")
     keys = ["total_return_%", "CAGR_%", "Sharpe", "Sortino", "MaxDD_%", "Calmar",
-            "n_trades", "win_rate_%", "profit_factor", "avg_R", "final_equity_$"]
+            "n_trades", "win_rate_%", "profit_factor", "avg_R",
+            "scale_outs", "scale_ins", "final_equity_$"]
     for symbol, data in result["metrics"].items():
         m = data["strategy"]
         bh = data["buy_hold"]

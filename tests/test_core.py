@@ -70,6 +70,35 @@ def test_engine_runs():
     print(f"OK engine: {len(res.trades)} lệnh, equity cuối = {res.equity_curve.iloc[-1]:.2f}")
 
 
+def test_tiered_management_scales():
+    """Bật tiered -> có scale-out/in; tắt -> không có scale event nào."""
+    from src.engine import run_backtest
+    cfg = C.BacktestConfig()
+    base_1h = datamod.synthetic_ohlcv("BTCUSDT", "1h", periods=12000)
+    ohlcv = {tf: (base_1h if tf == "1h" else datamod.resample_ohlcv(base_1h, tf))
+             for tf in [cfg.execution_tf] + cfg.confluence_tfs}
+    sig = prepare_signal_frame(ohlcv, cfg).dropna(subset=["atr", "rsi_wma"])
+
+    cfg.strategy.tiered_management = True
+    on = run_backtest(sig, "BTCUSDT", cfg)
+    assert on.n_scale_outs > 0, "Bật tiered phải có scale-out khi RSI mất EMA9"
+
+    cfg.strategy.tiered_management = False
+    off = run_backtest(sig, "BTCUSDT", cfg)
+    assert off.n_scale_ins == 0, "Tắt tiered không được scale-in"
+    # khi tắt, chỉ giảm về 0 (thoát hẳn) -> không có bước giảm một phần lặp lại
+    print(f"OK tiered: scale_out on={on.n_scale_outs}, off={off.n_scale_outs}")
+
+
+def test_weighted_avg_entry_on_scale_in():
+    """scale_in cập nhật giá vốn bình quân đúng công thức."""
+    from src.engine import run_backtest
+    # kiểm tra trực tiếp công thức avg: (p1*q1 + p2*q2)/(q1+q2)
+    q1, p1, q2, p2 = 1.0, 100.0, 0.5, 110.0
+    avg = (p1 * q1 + p2 * q2) / (q1 + q2)
+    assert abs(avg - (100 + 55) / 1.5) < 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

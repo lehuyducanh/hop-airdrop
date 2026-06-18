@@ -29,6 +29,26 @@ Cấu trúc khung mặc định (sửa trong `config.py`):
 - Phí taker **0.04%**, slippage **0.03%** mỗi chiều, **funding ~0.01%/8h**.
 - Thoát khi: chạm stop / RSI khung thực thi mất phe / (tùy chọn) đảo chiều.
 
+### Quản lý khối lượng động — scale-out / scale-in
+
+Mỗi khi **nến khung thực thi đóng**, hệ thống đánh giá **rủi ro đảo chiều khung
+nhỏ** qua quan hệ giữa RSI và đường nhanh EMA9(RSI), rồi điều chỉnh khối lượng
+về **trọng số mục tiêu** (khớp ở open nến kế tiếp):
+
+| Bậc | Điều kiện (vị thế long) | Hành động | Trọng số |
+|---|---|---|---|
+| **STRONG** | RSI còn trên EMA9 | giữ/khôi phục full | `1.0` |
+| **CAUTION** | RSI mất EMA9 nhưng còn trên WMA45 | **giảm volume** | `reduced_weight` (0.5) |
+| **BROKEN** | RSI xuống dưới WMA45 | **thoát hẳn** | `0` |
+
+→ Khi khung nhỏ **vào lại chu kỳ** (RSI lấy lại EMA9), volume được **tăng trở
+lại full** (không vượt quá size ban đầu). Phần scale-out hiện thực hóa PnL ngay;
+phần scale-in dùng **giá vốn bình quân gia quyền**. Mỗi vòng lệnh vẫn chỉ tính là
+1 trade; báo cáo có thêm `scale_outs` / `scale_ins`.
+
+Bật/tắt và tinh chỉnh trong `config.py` → `StrategyParams.tiered_management`,
+`reduced_weight`, `min_rebalance_frac`.
+
 ## Chống look-ahead (quan trọng)
 
 - Tín hiệu chốt trên **close** nến `t`, lệnh khớp ở **open** nến `t+1`.

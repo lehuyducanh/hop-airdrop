@@ -60,6 +60,17 @@ class StrategyParams:
     # Đảo chiều ngay sang lệnh ngược khi có tín hiệu ngược (thay vì chỉ đóng)
     allow_flip: bool = False
 
+    # --- Quản lý khối lượng động (scale-out / scale-in) ---
+    # Mỗi khi nến khung thực thi (khung nhỏ nhất trong rổ) đóng, đánh giá rủi ro
+    # đảo chiều bằng quan hệ RSI với EMA9(RSI):
+    #   - STRONG : RSI còn trên EMA9        -> giữ full   (weight = 1.0)
+    #   - CAUTION: RSI mất EMA9 nhưng > WMA45 -> giảm volume (weight = reduced_weight)
+    #   - BROKEN : RSI < WMA45              -> thoát hẳn (weight = 0)
+    # Khi khung nhỏ vào lại chu kỳ (RSI lấy lại EMA9) -> tăng volume về full.
+    tiered_management: bool = True
+    reduced_weight: float = 0.5       # tỉ lệ giữ lại khi có rủi ro đảo chiều
+    min_rebalance_frac: float = 0.05  # bỏ qua điều chỉnh quá nhỏ (theo base_qty)
+
 
 # ---------------------------------------------------------------------------
 # Tham số rủi ro & chi phí (Binance USDT-M Futures)
