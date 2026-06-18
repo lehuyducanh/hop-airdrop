@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Dữ liệu cache & kết quả (tái tạo được)
+data/*.parquet
+results/*.png
+results/*.json
+
+# OS
+.DS_Store
