@@ -58,22 +58,20 @@ def _funding_due(open_time: pd.Timestamp) -> bool:
     return open_time.hour in (0, 8, 16)
 
 
-def _target_weight(side: str, rsi, ema, wma, strat) -> float:
-    """Trọng số mục tiêu của vị thế theo rủi ro đảo chiều khung nhỏ."""
-    if np.isnan(rsi) or np.isnan(ema) or np.isnan(wma):
+def _manage_weight(side: str, rsi, ema, strat) -> float:
+    """
+    Trọng số volume theo rủi ro đảo chiều KHUNG NỀN (manage_tf).
+    Việc thoát hẳn do execution_tf/stop quyết định, không nằm ở đây.
+    - long : RSI còn trên EMA9 -> full (1.0); mất EMA9 -> reduced_weight.
+    - short: RSI còn dưới EMA9 -> full (1.0); mất EMA9 -> reduced_weight.
+    """
+    if not strat.tiered_management:
+        return 1.0
+    if np.isnan(rsi) or np.isnan(ema):
         return 1.0
     if side == "long":
-        if rsi < wma:               # gãy nền -> thoát
-            return 0.0
-        if not strat.tiered_management:
-            return 1.0
-        return 1.0 if rsi > ema else strat.reduced_weight  # mất EMA9 -> giảm
-    else:  # short
-        if rsi > wma:
-            return 0.0
-        if not strat.tiered_management:
-            return 1.0
-        return 1.0 if rsi < ema else strat.reduced_weight
+        return 1.0 if rsi > ema else strat.reduced_weight
+    return 1.0 if rsi < ema else strat.reduced_weight
 
 
 def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> BacktestResult:
@@ -96,16 +94,19 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
     lows = df["low"].to_numpy()
     closes = df["close"].to_numpy()
     atr = df["atr"].to_numpy()
-    rsi = df["rsi"].to_numpy()
+    rsi = df["rsi"].to_numpy()              # RSI khung nền (manage) -> quản lý volume
     rsi_ema = df["rsi_ema"].to_numpy()
-    rsi_wma = df["rsi_wma"].to_numpy()
-    tlong = df["trigger_long"].to_numpy()
-    tshort = df["trigger_short"].to_numpy()
+    # Tín hiệu execution (đã align xuống khung nền)
+    tlong = df["exec_trigger_long"].to_numpy()
+    tshort = df["exec_trigger_short"].to_numpy()
+    exec_state = df["exec_state"].to_numpy()
+    exec_ct = df["exec_ct"].to_numpy()
     clong = df["confl_long"].to_numpy()
     cshort = df["confl_short"].to_numpy()
     times = df.index
 
-    pending = None  # (side, weight): trạng thái mục tiêu cho nến kế tiếp
+    pending = None       # (side, weight, reason): trạng thái mục tiêu cho nến kế tiếp
+    last_exec_ct = None  # close_time của nến execution gần nhất đã xử lý (edge detect)
 
     # ---- thao tác vị thế ----
     def open_position(side, price, time_i, atr_val, weight):
@@ -228,24 +229,39 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
                 close_position(pos["stop"], times[i], "stop")
 
         # 3) Quyết định trạng thái mục tiêu cho nến kế tiếp (dựa trên CLOSE nến i)
+        #    Trigger execution chỉ được "ăn" 1 lần / nến execution mới (edge detect).
+        is_new_exec = exec_ct[i] != last_exec_ct
+        if is_new_exec:
+            last_exec_ct = exec_ct[i]
+        n_req = strat.confluence_n
+
         if pos is None:
-            if strat.allow_long and tlong[i] and clong[i] >= strat.confluence_n:
+            if (is_new_exec and strat.allow_long and tlong[i]
+                    and clong[i] >= n_req):
                 pending = ("long", 1.0, "entry")
-            elif strat.allow_short and tshort[i] and cshort[i] >= strat.confluence_n:
+            elif (is_new_exec and strat.allow_short and tshort[i]
+                    and cshort[i] >= n_req):
                 pending = ("short", 1.0, "entry")
         else:
             side = pos["side"]
-            opp_long = strat.allow_short and tshort[i] and cshort[i] >= strat.confluence_n
-            opp_short = strat.allow_long and tlong[i] and clong[i] >= strat.confluence_n
-            opp = opp_long if side == "long" else opp_short
+            # tín hiệu execution ngược chiều (chỉ tính trên nến execution mới)
+            if side == "long":
+                opp = is_new_exec and strat.allow_short and tshort[i] and cshort[i] >= n_req
+                exec_invalid = exec_state[i] == -1   # execution mất phe long
+            else:
+                opp = is_new_exec and strat.allow_long and tlong[i] and clong[i] >= n_req
+                exec_invalid = exec_state[i] == 1
+
             if opp and strat.allow_flip:
                 pending = ("short" if side == "long" else "long", 1.0, "flip")
+            elif strat.exit_on_state_flip and exec_invalid:
+                pending = ("flat", 0.0, "exec_exit")     # THOÁT HẲN do execution_tf
+            elif opp:
+                pending = ("flat", 0.0, "opp_exit")
             else:
-                w = _target_weight(side, rsi[i], rsi_ema[i], rsi_wma[i], strat)
-                if w <= 0.0:
-                    pending = ("flat", 0.0, "state_exit")
-                else:
-                    pending = (side, w, "rebalance")
+                # còn trong xu hướng execution -> chỉ tăng/giảm volume theo manage_tf
+                w = _manage_weight(side, rsi[i], rsi_ema[i], strat)
+                pending = (side, w, "rebalance")
 
         # 4) Mark-to-market equity tại close
         if pos is not None:

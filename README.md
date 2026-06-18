@@ -17,10 +17,14 @@ Trên mỗi khung tính 3 đường: `RSI`, `EMA9(RSI)` (tín hiệu nhanh), `WM
 
 Cấu trúc khung mặc định (sửa trong `config.py`):
 
-| Vai trò | Khung |
-|---|---|
-| Thực thi (bấm cò) | `4h` |
-| Đồng thuận (lọc) | `12h`, `1d`, `3d`, `1w` |
+| Vai trò | Khung | Nhiệm vụ |
+|---|---|---|
+| **Execution** (bấm cò) | `4h` | Trigger VÀO lệnh + tín hiệu THOÁT hẳn (mất phe) |
+| **Manage** (khung nền, mịn hơn) | `1h` | Tăng/giảm volume (scale-out/in) — engine chạy theo khung này |
+| **Confluence** (lọc) | `12h`, `1d`, `3d`, `1w` | Đếm đồng thuận để vào lệnh |
+
+> Quy ước: `manage_tf` mịn hơn `execution_tf` (vd `4h → 1h`, `1h → 15m`). Đặt
+> `MANAGE_TF = None` nếu muốn quản lý volume ngay trên khung execution.
 
 ## Quản trị lệnh (Futures)
 
@@ -29,24 +33,29 @@ Cấu trúc khung mặc định (sửa trong `config.py`):
 - Phí taker **0.04%**, slippage **0.03%** mỗi chiều, **funding ~0.01%/8h**.
 - Thoát khi: chạm stop / RSI khung thực thi mất phe / (tùy chọn) đảo chiều.
 
-### Quản lý khối lượng động — scale-out / scale-in
+### Quản lý khối lượng động — scale-out / scale-in (trên khung mịn hơn)
 
-Mỗi khi **nến khung thực thi đóng**, hệ thống đánh giá **rủi ro đảo chiều khung
-nhỏ** qua quan hệ giữa RSI và đường nhanh EMA9(RSI), rồi điều chỉnh khối lượng
-về **trọng số mục tiêu** (khớp ở open nến kế tiếp):
+Việc tăng/giảm volume được đánh giá ở **`manage_tf`** — khung **mịn hơn** khung
+vào lệnh (vd vào `4h` thì quản lý ở `1h`). Mỗi khi **nến khung nền đóng**, hệ
+thống xét quan hệ giữa RSI và đường nhanh EMA9(RSI) **của chính khung nền** để
+điều chỉnh khối lượng (khớp ở open nến nền kế tiếp):
 
-| Bậc | Điều kiện (vị thế long) | Hành động | Trọng số |
+| Tình huống (vị thế long) | Đánh giá | Hành động | Trọng số |
 |---|---|---|---|
-| **STRONG** | RSI còn trên EMA9 | giữ/khôi phục full | `1.0` |
-| **CAUTION** | RSI mất EMA9 nhưng còn trên WMA45 | **giảm volume** | `reduced_weight` (0.5) |
-| **BROKEN** | RSI xuống dưới WMA45 | **thoát hẳn** | `0` |
+| RSI khung nền còn trên EMA9 | xu hướng nhỏ ổn | giữ/khôi phục full | `1.0` |
+| RSI khung nền mất EMA9 | **rủi ro đảo chiều khung nhỏ** | **giảm volume** | `reduced_weight` (0.5) |
+| Khung nền vào lại chu kỳ (RSI lấy lại EMA9) | rủi ro hạ | **tăng volume lại** | `1.0` |
 
-→ Khi khung nhỏ **vào lại chu kỳ** (RSI lấy lại EMA9), volume được **tăng trở
-lại full** (không vượt quá size ban đầu). Phần scale-out hiện thực hóa PnL ngay;
-phần scale-in dùng **giá vốn bình quân gia quyền**. Mỗi vòng lệnh vẫn chỉ tính là
-1 trade; báo cáo có thêm `scale_outs` / `scale_ins`.
+**Thoát hẳn** (đóng toàn bộ) KHÔNG do khung nền quyết định, mà do:
+- `execution_tf` **mất phe** (RSI execution cắt xuống dưới WMA45), hoặc
+- chạm **stop** / trailing, hoặc (tùy chọn) tín hiệu **đảo chiều**.
 
-Bật/tắt và tinh chỉnh trong `config.py` → `StrategyParams.tiered_management`,
+→ Nhờ vậy, khung nhỏ chỉ điều tiết *khối lượng* trong khi luận điểm xu hướng vẫn
+do khung lớn giữ. Scale-out hiện thực hóa PnL ngay; scale-in dùng **giá vốn bình
+quân gia quyền**; volume không vượt size ban đầu. Mỗi vòng lệnh vẫn tính 1 trade,
+báo cáo thêm `scale_outs` / `scale_ins`.
+
+Tinh chỉnh trong `config.py`: `manage_tf`, `StrategyParams.tiered_management`,
 `reduced_weight`, `min_rebalance_frac`.
 
 ## Chống look-ahead (quan trọng)

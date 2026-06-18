@@ -24,12 +24,19 @@ FUTURES_BASE = "https://fapi.binance.com/fapi/v1/klines"
 SPOT_BASE = "https://api.binance.com/api/v3/klines"
 
 _TF_MS = {
+    "15m": 15 * 60_000,
     "1h": 3_600_000,
     "4h": 4 * 3_600_000,
     "12h": 12 * 3_600_000,
     "1d": 24 * 3_600_000,
     "3d": 3 * 24 * 3_600_000,
     "1w": 7 * 24 * 3_600_000,
+}
+
+# Quy tắc resample pandas tương ứng mỗi khung
+_TF_RULE = {
+    "15m": "15min", "1h": "1h", "4h": "4h", "12h": "12h",
+    "1d": "1D", "3d": "3D", "1w": "1W",
 }
 
 
@@ -176,10 +183,10 @@ def synthetic_ohlcv(symbol: str = "BTCUSDT", interval: str = "1h",
     return df
 
 
-def resample_ohlcv(df_1h: pd.DataFrame, interval: str) -> pd.DataFrame:
-    """Gộp khung từ dữ liệu 1h (dùng cho synthetic để các khung nhất quán)."""
-    rule = {"4h": "4h", "12h": "12h", "1d": "1D", "3d": "3D", "1w": "1W"}[interval]
-    agg = df_1h.resample(rule, label="left", closed="left").agg({
+def resample_ohlcv(df_base: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Gộp khung từ dữ liệu nền mịn hơn (dùng cho synthetic để các khung nhất quán)."""
+    rule = _TF_RULE[interval]
+    agg = df_base.resample(rule, label="left", closed="left").agg({
         "open": "first", "high": "max", "low": "min",
         "close": "last", "volume": "sum",
     }).dropna()

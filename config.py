@@ -17,13 +17,18 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-# Các khung Binance hỗ trợ native: 1h, 4h, 12h, 1d, 3d, 1w
-ALL_TIMEFRAMES = ["1h", "4h", "12h", "1d", "3d", "1w"]
+# Các khung Binance hỗ trợ native: 15m, 1h, 4h, 12h, 1d, 3d, 1w
+ALL_TIMEFRAMES = ["15m", "1h", "4h", "12h", "1d", "3d", "1w"]
 
-# Khung dùng để bấm cò vào/thoát lệnh
+# Khung dùng để bấm cò VÀO/THOÁT lệnh
 EXECUTION_TF = "4h"
 
-# Các khung cao dùng để đếm đồng thuận (confluence). KHÔNG gồm execution_tf.
+# Khung MỊN hơn execution để quản lý tăng/giảm volume (scale-out/in).
+# Ví dụ: execution=4h -> manage=1h; execution=1h -> manage=15m.
+# Để None nếu muốn quản lý ngay trên execution_tf.
+MANAGE_TF = "1h"
+
+# Các khung cao dùng để đếm đồng thuận (confluence). KHÔNG gồm execution/manage.
 CONFLUENCE_TFS = ["12h", "1d", "3d", "1w"]
 
 # Lịch sử kéo về (đủ bao gồm bull 2020-21, bear 2022, hồi 2023-24)
@@ -93,6 +98,7 @@ class RiskParams:
 class BacktestConfig:
     symbols: list = field(default_factory=lambda: list(SYMBOLS))
     execution_tf: str = EXECUTION_TF
+    manage_tf: str = MANAGE_TF       # None -> quản lý ngay trên execution_tf
     confluence_tfs: list = field(default_factory=lambda: list(CONFLUENCE_TFS))
     indicators: IndicatorParams = field(default_factory=IndicatorParams)
     strategy: StrategyParams = field(default_factory=StrategyParams)
@@ -100,9 +106,15 @@ class BacktestConfig:
     start: str = START_DATE
     end: str = END_DATE
 
+    @property
+    def base_tf(self) -> str:
+        """Khung nền mà engine chạy theo = manage_tf nếu có, ngược lại execution_tf."""
+        return self.manage_tf or self.execution_tf
+
 
 # Số nến / năm để annualize Sharpe theo từng khung
 BARS_PER_YEAR = {
+    "15m": 4 * 24 * 365,
     "1h": 24 * 365,
     "4h": 6 * 365,
     "12h": 2 * 365,

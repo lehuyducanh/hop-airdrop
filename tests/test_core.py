@@ -13,9 +13,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.indicators import rsi_wilder, ema, wma, compute_rsi_stack
 from src import data as datamod
-from src.signals import (build_timeframe_signals, align_higher_tf_states,
-                         add_confluence, prepare_signal_frame)
+from src.signals import build_timeframe_signals, align_to_base, prepare_signal_frame
 import config as C
+
+
+def _make_cfg(manage_tf, execution_tf="4h", confluence=("1d",)):
+    cfg = C.BacktestConfig()
+    cfg.execution_tf = execution_tf
+    cfg.manage_tf = manage_tf
+    cfg.confluence_tfs = list(confluence)
+    return cfg
+
+
+def _synth_ohlcv(cfg, symbol="BTCUSDT", periods=12000):
+    base = datamod.synthetic_ohlcv(symbol, cfg.base_tf, periods=periods)
+    tfs = {cfg.base_tf, cfg.execution_tf, *cfg.confluence_tfs}
+    return {tf: (base.copy() if tf == cfg.base_tf else datamod.resample_ohlcv(base, tf))
+            for tf in tfs}
 
 
 def test_rsi_bounds():
@@ -38,30 +52,41 @@ def test_wma_weights_recent_more():
 
 
 def test_no_lookahead_alignment():
-    """State khung cao tại nến exec không được dùng thông tin tương lai."""
-    base_1h = datamod.synthetic_ohlcv("BTCUSDT", "1h", periods=3000)
-    ohlcv = {"4h": datamod.resample_ohlcv(base_1h, "4h"),
-             "1d": datamod.resample_ohlcv(base_1h, "1d")}
-    ind = C.IndicatorParams()
-    sig = build_timeframe_signals(ohlcv, ind)
-    aligned = align_higher_tf_states(sig["4h"], {"1d": sig["1d"]})
+    """State execution gán xuống khung nền không dùng thông tin tương lai."""
+    cfg = _make_cfg(manage_tf="1h", execution_tf="4h", confluence=("1d",))
+    ohlcv = _synth_ohlcv(cfg, periods=6000)
+    tf_sig = build_timeframe_signals(ohlcv, cfg.indicators)
+    base = prepare_signal_frame(ohlcv, cfg)
 
-    # Với mỗi nến 4h, close_time của nến 1d được gán phải <= open_time nến 4h
-    daily = sig["1d"].reset_index()[["close_time", "state"]].sort_values("close_time")
-    for t in aligned.index[::50]:
-        st = aligned.loc[t, "state_1d"]
-        if pd.isna(st):
+    # Với mỗi nến nền 1h, exec_state phải khớp nến 4h gần nhất ĐÃ ĐÓNG (close<=close nền)
+    ex = tf_sig["4h"].reset_index()[["close_time", "state"]].sort_values("close_time")
+    for t in base.index[::40]:
+        st = base.loc[t, "exec_state"]
+        bt = pd.Timestamp(base.loc[t, "close_time"])
+        valid = ex[ex["close_time"] <= bt]
+        if valid.empty or pd.isna(st):
             continue
-        valid = daily[daily["close_time"] <= t]
-        assert not valid.empty
         assert valid.iloc[-1]["state"] == st, f"Look-ahead tại {t}!"
 
 
+def test_manage_finer_than_execution():
+    """Engine chạy theo khung nền mịn (1h) trong khi vào lệnh ở 4h."""
+    from src.engine import run_backtest
+    cfg = _make_cfg(manage_tf="1h", execution_tf="4h", confluence=("12h", "1d"))
+    ohlcv = _synth_ohlcv(cfg, periods=15000)
+    sig = prepare_signal_frame(ohlcv, cfg).dropna(subset=["atr", "rsi_wma"])
+    # khung nền phải mịn hơn execution -> nhiều nến hơn nhiều
+    assert len(sig) > len(ohlcv["4h"])
+    res = run_backtest(sig, "BTCUSDT", cfg)
+    assert len(res.equity_curve) == len(sig)
+    assert res.equity_curve.iloc[-1] > 0
+    print(f"OK manage<exec: bars={len(sig)}, lệnh={len(res.trades)}, "
+          f"scale_out={res.n_scale_outs}, scale_in={res.n_scale_ins}")
+
+
 def test_engine_runs():
-    cfg = C.BacktestConfig()
-    base_1h = datamod.synthetic_ohlcv("BTCUSDT", "1h", periods=8000)
-    ohlcv = {tf: (base_1h if tf == "1h" else datamod.resample_ohlcv(base_1h, tf))
-             for tf in [cfg.execution_tf] + cfg.confluence_tfs}
+    cfg = _make_cfg(manage_tf=None, execution_tf="4h", confluence=("12h", "1d"))
+    ohlcv = _synth_ohlcv(cfg, periods=8000)
     sig = prepare_signal_frame(ohlcv, cfg).dropna(subset=["atr", "rsi_wma"])
     from src.engine import run_backtest
     res = run_backtest(sig, "BTCUSDT", cfg)
@@ -73,10 +98,8 @@ def test_engine_runs():
 def test_tiered_management_scales():
     """Bật tiered -> có scale-out/in; tắt -> không có scale event nào."""
     from src.engine import run_backtest
-    cfg = C.BacktestConfig()
-    base_1h = datamod.synthetic_ohlcv("BTCUSDT", "1h", periods=12000)
-    ohlcv = {tf: (base_1h if tf == "1h" else datamod.resample_ohlcv(base_1h, tf))
-             for tf in [cfg.execution_tf] + cfg.confluence_tfs}
+    cfg = _make_cfg(manage_tf="1h", execution_tf="4h", confluence=("12h", "1d"))
+    ohlcv = _synth_ohlcv(cfg, periods=15000)
     sig = prepare_signal_frame(ohlcv, cfg).dropna(subset=["atr", "rsi_wma"])
 
     cfg.strategy.tiered_management = True

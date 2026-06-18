@@ -1,14 +1,15 @@
 """
-Sinh tín hiệu: trạng thái/trigger từng khung + ghép đa khung KHÔNG look-ahead.
+Sinh tín hiệu đa khung, ghép về KHUNG NỀN (manage_tf) KHÔNG look-ahead.
 
-Quy tắc (xem config.py):
-- state = +1 nếu RSI > WMA45 (bullish), -1 nếu RSI < WMA45 (bearish), 0 nếu chưa đủ dữ liệu.
-- trigger_long  : RSI[t] > EMA9 & > WMA45 và RSI[t-1] <= WMA45[t-1]  (cắt lên từ dưới).
-- trigger_short : RSI[t] < EMA9 & < WMA45 và RSI[t-1] >= WMA45[t-1]  (cắt xuống từ trên).
+Phân tách trách nhiệm:
+- execution_tf : sinh trigger vào lệnh + state để thoát hẳn (mất phe).
+- confluence_tfs: state khung cao để đếm đồng thuận.
+- manage_tf (nền): khung mịn hơn execution; engine chạy theo khung này và dùng
+  RSI/EMA9 của chính nó để tăng/giảm volume (scale-out/in).
 
-Chống look-ahead: state của khung CAO chỉ được dùng SAU khi nến khung đó ĐÓNG
-(close_time). Ghép bằng merge_asof trên close_time -> mỗi nến execution chỉ thấy
-thông tin khung cao đã thực sự chốt.
+Chống look-ahead: với mỗi nến nền đóng tại close_time t, chỉ dùng dữ liệu của
+khung cao/execution đã ĐÓNG trước hoặc đúng t (merge_asof backward theo close_time).
+Quyết định ở close nến nền -> khớp ở open nến nền kế tiếp (xử lý trong engine).
 """
 
 from __future__ import annotations
@@ -20,16 +21,14 @@ from .indicators import compute_rsi_stack
 
 
 def add_state_and_triggers(df: pd.DataFrame) -> pd.DataFrame:
-    """Thêm cột state, trigger_long, trigger_short. Yêu cầu df đã có rsi/rsi_ema/rsi_wma."""
+    """Thêm state, trigger_long, trigger_short. Yêu cầu đã có rsi/rsi_ema/rsi_wma."""
     out = df.copy()
     rsi, ema_, wma_ = out["rsi"], out["rsi_ema"], out["rsi_wma"]
 
-    state = np.where(rsi > wma_, 1, np.where(rsi < wma_, -1, 0))
-    out["state"] = state
+    out["state"] = np.where(rsi > wma_, 1, np.where(rsi < wma_, -1, 0))
 
     prev_rsi = rsi.shift(1)
     prev_wma = wma_.shift(1)
-
     out["trigger_long"] = (
         (rsi > ema_) & (rsi > wma_) & (prev_rsi <= prev_wma)
     ).fillna(False)
@@ -40,7 +39,7 @@ def add_state_and_triggers(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_timeframe_signals(ohlcv: dict[str, pd.DataFrame], indicators) -> dict[str, pd.DataFrame]:
-    """Tính chỉ báo + state/trigger cho từng khung. ohlcv: {tf: DataFrame}."""
+    """Tính chỉ báo + state/trigger cho từng khung."""
     result = {}
     for tf, df in ohlcv.items():
         stacked = compute_rsi_stack(
@@ -51,55 +50,75 @@ def build_timeframe_signals(ohlcv: dict[str, pd.DataFrame], indicators) -> dict[
     return result
 
 
-def align_higher_tf_states(exec_df: pd.DataFrame,
-                           higher: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def align_to_base(base_df: pd.DataFrame, source_df: pd.DataFrame,
+                  value_map: dict[str, str],
+                  also_close_time_as: str | None = None) -> pd.DataFrame:
     """
-    Gán state các khung cao xuống khung thực thi theo close_time (no look-ahead).
+    Gán các cột của source_df xuống base_df theo close_time (backward, no look-ahead).
 
-    Với mỗi nến execution có open_time t, ta lấy state của khung cao từ nến gần
-    nhất ĐÃ ĐÓNG trước hoặc đúng t (merge_asof backward trên close_time).
+    value_map: {tên_cột_nguồn: tên_cột_đích}. Với mỗi nến nền, lấy giá trị của
+    nến nguồn gần nhất đã ĐÓNG (close_time <= close_time nền).
     """
-    base = exec_df.copy()
-    # mốc ra quyết định = open của nến exec; chuẩn hóa độ phân giải datetime
-    base["_exec_open"] = pd.to_datetime(base.index).as_unit("ns")
+    base = base_df.sort_index().copy()
+    bkey = pd.to_datetime(base["close_time"]).dt.as_unit("ns").to_numpy()
 
-    for tf, hdf in higher.items():
-        h = hdf.reset_index()[["close_time", "state"]].rename(
-            columns={"state": f"state_{tf}"}
-        ).sort_values("close_time")
-        h["close_time"] = pd.to_datetime(h["close_time"]).dt.as_unit("ns")
-        merged = pd.merge_asof(
-            base.sort_values("_exec_open"),
-            h,
-            left_on="_exec_open",
-            right_on="close_time",
-            direction="backward",
-        )
-        base[f"state_{tf}"] = merged[f"state_{tf}"].to_numpy()
+    src_cols = list(value_map.keys())
+    src = source_df.sort_index().reset_index()
+    src_ct = pd.to_datetime(src["close_time"]).dt.as_unit("ns").to_numpy()
 
-    base = base.drop(columns=["_exec_open"])
+    left = pd.DataFrame({"_k": bkey})
+    right = pd.DataFrame({"_k": src_ct})
+    for c in src_cols:
+        right[value_map[c]] = src[c].to_numpy()
+    if also_close_time_as:
+        right[also_close_time_as] = src_ct
+    right = right.sort_values("_k")
+
+    merged = pd.merge_asof(left, right, on="_k", direction="backward")
+
+    out_cols = [value_map[c] for c in src_cols]
+    if also_close_time_as:
+        out_cols.append(also_close_time_as)
+    for col in out_cols:
+        base[col] = merged[col].to_numpy()
     return base
-
-
-def add_confluence(exec_df: pd.DataFrame, confluence_tfs: list[str]) -> pd.DataFrame:
-    """Đếm số khung cao bullish / bearish tại mỗi nến execution."""
-    out = exec_df.copy()
-    cols = [f"state_{tf}" for tf in confluence_tfs]
-    states = out[cols]
-    out["confl_long"] = (states == 1).sum(axis=1)
-    out["confl_short"] = (states == -1).sum(axis=1)
-    return out
 
 
 def prepare_signal_frame(symbol_ohlcv: dict[str, pd.DataFrame], cfg) -> pd.DataFrame:
     """
     Pipeline đầy đủ cho 1 symbol:
-      OHLCV mọi khung -> chỉ báo+state/trigger -> ghép khung cao -> đếm confluence.
-    Trả về DataFrame khung thực thi đã đủ cột để chạy engine.
+      OHLCV mọi khung -> chỉ báo+state/trigger -> ghép execution+confluence xuống
+      khung nền (manage_tf) -> đếm confluence. Trả về DataFrame khung nền sẵn sàng
+      cho engine.
+
+    Cột khung nền giữ nguyên rsi/rsi_ema/rsi_wma/atr/ohlc của chính nó (dùng để
+    quản lý volume + stop). Thêm:
+      exec_trigger_long/short, exec_state, exec_ct  (từ execution_tf)
+      state_<tf> + confl_long/short                (từ confluence_tfs)
     """
     tf_sig = build_timeframe_signals(symbol_ohlcv, cfg.indicators)
-    exec_df = tf_sig[cfg.execution_tf]
-    higher = {tf: tf_sig[tf] for tf in cfg.confluence_tfs}
-    aligned = align_higher_tf_states(exec_df, higher)
-    final = add_confluence(aligned, cfg.confluence_tfs)
-    return final
+    base = tf_sig[cfg.base_tf]
+    exec_sig = tf_sig[cfg.execution_tf]
+
+    # Tín hiệu execution -> nền (kèm exec_ct để phát hiện nến execution mới)
+    base = align_to_base(
+        base, exec_sig,
+        {"trigger_long": "exec_trigger_long",
+         "trigger_short": "exec_trigger_short",
+         "state": "exec_state"},
+        also_close_time_as="exec_ct",
+    )
+
+    # Đồng thuận khung cao -> nền
+    for tf in cfg.confluence_tfs:
+        base = align_to_base(base, tf_sig[tf], {"state": f"state_{tf}"})
+
+    # Chuẩn hóa kiểu dữ liệu
+    base["exec_trigger_long"] = base["exec_trigger_long"].fillna(False).astype(bool)
+    base["exec_trigger_short"] = base["exec_trigger_short"].fillna(False).astype(bool)
+    base["exec_state"] = base["exec_state"].fillna(0)
+
+    cols = [f"state_{tf}" for tf in cfg.confluence_tfs]
+    base["confl_long"] = (base[cols] == 1).sum(axis=1)
+    base["confl_short"] = (base[cols] == -1).sum(axis=1)
+    return base

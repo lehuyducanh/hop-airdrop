@@ -26,15 +26,27 @@ from src.engine import run_backtest
 from src.metrics import compute_metrics, buy_and_hold
 
 
+def _needed_tfs(cfg) -> list[str]:
+    """Tập khung cần nạp: nền (manage) + execution + confluence (không trùng)."""
+    tfs = [cfg.base_tf, cfg.execution_tf] + list(cfg.confluence_tfs)
+    seen, out = set(), []
+    for tf in tfs:
+        if tf not in seen:
+            seen.add(tf)
+            out.append(tf)
+    return out
+
+
 def load_all_timeframes(symbol: str, cfg, synthetic: bool) -> dict[str, pd.DataFrame]:
-    """Trả về {tf: OHLCV} cho execution_tf + confluence_tfs."""
-    tfs = [cfg.execution_tf] + list(cfg.confluence_tfs)
+    """Trả về {tf: OHLCV} cho mọi khung cần dùng."""
+    tfs = _needed_tfs(cfg)
     out = {}
     if synthetic:
-        base_1h = datamod.synthetic_ohlcv(symbol, "1h", start=cfg.start or "2020-01-01",
-                                          periods=30_000)
+        # sinh ở khung nền mịn nhất rồi gộp lên các khung thô hơn
+        base = datamod.synthetic_ohlcv(symbol, cfg.base_tf,
+                                       start=cfg.start or "2020-01-01", periods=40_000)
         for tf in tfs:
-            out[tf] = base_1h.copy() if tf == "1h" else datamod.resample_ohlcv(base_1h, tf)
+            out[tf] = base.copy() if tf == cfg.base_tf else datamod.resample_ohlcv(base, tf)
         return out
 
     for tf in tfs:
@@ -55,9 +67,9 @@ def run_for_n(cfg, synthetic: bool, n: int) -> dict:
         sig = prepare_signal_frame(ohlcv, cfg)
         sig = sig.dropna(subset=["atr", "rsi_wma"])  # bỏ giai đoạn warmup chỉ báo
         res = run_backtest(sig, symbol, cfg, label=f"N={n}")
-        m = compute_metrics(res.equity_curve, res.trades, cfg.execution_tf,
+        m = compute_metrics(res.equity_curve, res.trades, cfg.base_tf,
                             cfg.risk.initial_equity)
-        bh = buy_and_hold(sig["close"], cfg.risk.initial_equity, cfg.execution_tf)
+        bh = buy_and_hold(sig["close"], cfg.risk.initial_equity, cfg.base_tf)
         m["scale_outs"] = res.n_scale_outs
         m["scale_ins"] = res.n_scale_ins
         rows[symbol] = {"strategy": m, "buy_hold": bh}
@@ -101,7 +113,8 @@ def save_outputs(all_results: dict, cfg):
             for symbol, eq in res["equity"].items():
                 plt.figure(figsize=(11, 5))
                 eq.plot(label=f"{symbol} {label}")
-                plt.title(f"Equity Curve - {symbol} ({label}, exec={cfg.execution_tf})")
+                plt.title(f"Equity Curve - {symbol} ({label}, "
+                          f"exec={cfg.execution_tf}, manage={cfg.base_tf})")
                 plt.ylabel("Equity ($)")
                 plt.grid(alpha=0.3)
                 plt.legend()
@@ -122,6 +135,11 @@ def main():
 
     cfg = C.BacktestConfig()
     ns = [args.n] if args.n else [2, 3]
+
+    print(f"Execution TF : {cfg.execution_tf}")
+    print(f"Manage TF    : {cfg.base_tf} (quản lý tăng/giảm volume)")
+    print(f"Confluence   : {cfg.confluence_tfs}")
+    print(f"Symbols      : {cfg.symbols}")
 
     all_results = {}
     for n in ns:
