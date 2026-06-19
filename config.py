@@ -84,6 +84,10 @@ class StrategyParams:
     double_pattern_min_bounce: float = 8.0   # bounce tối thiểu giữa 2 đáy/đỉnh (RSI)
     double_pattern_tolerance: float = 5.0    # sai lệch tối đa giữa 2 đáy/đỉnh (RSI)
 
+    # --- Bỏ qua tín hiệu đầu tiên trong 1 chu kì tạo đáy/đỉnh ---
+    skip_first_signal: bool = False   # chỉ vào lệnh ở signal thứ 2 trong chu kì
+    cycle_reset_bars: int = 2         # số nến execution bearish liên tiếp để reset chu kì
+
 
 # ---------------------------------------------------------------------------
 # Tham số rủi ro & chi phí (Binance USDT-M Futures)
@@ -98,6 +102,8 @@ class RiskParams:
     use_swing_stop: bool = True       # dùng đáy/đỉnh gần nhất làm stop thay vì ATR×mult
     max_swing_atr_mult: float = 4.0   # trần khoảng cách stop (lần ATR) khi dùng swing
     min_swing_atr_mult: float = 0.5   # sàn khoảng cách stop tối thiểu (lần ATR)
+    use_fixed_rr: bool = False        # đặt TP cố định theo tỉ lệ R:R
+    rr_ratio: float = 3.0             # TP = entry ± rr_ratio × stop_distance (1:3)
     max_leverage: float = 5.0         # trần đòn bẩy cho notional
     taker_fee: float = 0.0004         # 0.04% taker / chiều
     slippage: float = 0.0003          # 0.03% trượt giá / chiều

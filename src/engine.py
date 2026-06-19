@@ -113,6 +113,12 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
     pending = None       # (side, weight, reason, sw_low, sw_high): trạng thái mục tiêu
     last_exec_ct = None  # close_time của nến execution gần nhất đã xử lý (edge detect)
 
+    # Đếm trigger trong chu kì để lọc tín hiệu đầu tiên (skip_first_signal)
+    cycle_long_count = 0    # số trigger_long đã xảy ra trong chu kì hiện tại
+    cycle_short_count = 0   # số trigger_short đã xảy ra trong chu kì hiện tại
+    bearish_exec_streak = 0  # nến execution bearish liên tiếp (để reset chu kì long)
+    bullish_exec_streak = 0  # nến execution bullish liên tiếp (để reset chu kì short)
+
     # ---- thao tác vị thế ----
     def open_position(side, price, time_i, atr_val, weight, sw_low=np.nan, sw_high=np.nan):
         nonlocal equity
@@ -145,10 +151,15 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
         fee = fill * qty * risk.taker_fee
         equity -= fee
         stop = fill - stop_dist if side == "long" else fill + stop_dist
+        # Take-profit cố định theo R:R
+        tp = None
+        if risk.use_fixed_rr:
+            tp_dist = risk.rr_ratio * stop_dist
+            tp = fill + tp_dist if side == "long" else fill - tp_dist
         return {
             "side": side, "entry_price": fill, "qty": qty, "base_qty": base_qty,
-            "stop": stop, "entry_time": time_i, "atr": atr_val, "fees": fee,
-            "funding": 0.0, "realized": 0.0, "extreme": fill,
+            "stop": stop, "take_profit": tp, "entry_time": time_i, "atr": atr_val,
+            "fees": fee, "funding": 0.0, "realized": 0.0, "extreme": fill,
             "init_stop_dist": stop_dist, "scale_outs": 0, "scale_ins": 0,
         }
 
@@ -180,7 +191,8 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
         n_scale_ins += 1
 
     def close_position(price, time_i, reason):
-        nonlocal pos
+        nonlocal pos, cycle_long_count, cycle_short_count
+        side_closed = pos["side"]
         scale_out(pos["qty"], price, time_i)  # đóng nốt phần còn lại
         pnl = pos["realized"] - pos["fees"] - pos["funding"]
         denom = pos["init_stop_dist"] * pos["base_qty"]
@@ -194,6 +206,11 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
             scale_ins=pos["scale_ins"],
         ))
         pos = None
+        # reset chu kì sau khi đóng lệnh -> bắt đầu đếm lại từ đầu
+        if side_closed == "long":
+            cycle_long_count = 0
+        else:
+            cycle_short_count = 0
 
     def reconcile(side, weight, price, time_i, atr_for_new, reason,
                   sw_low=np.nan, sw_high=np.nan):
@@ -247,12 +264,44 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
             elif pos["side"] == "short" and h >= pos["stop"]:
                 close_position(pos["stop"], times[i], "stop")
 
+            # Kiểm tra Take-Profit cố định (chỉ khi stop không vừa đóng lệnh)
+            if pos is not None and pos["take_profit"] is not None:
+                tp = pos["take_profit"]
+                if pos["side"] == "long" and h >= tp:
+                    close_position(tp, times[i], "take_profit")
+                elif pos["side"] == "short" and l <= tp:
+                    close_position(tp, times[i], "take_profit")
+
         # 3) Quyết định trạng thái mục tiêu cho nến kế tiếp (dựa trên CLOSE nến i)
         #    Trigger execution chỉ được "ăn" 1 lần / nến execution mới (edge detect).
         is_new_exec = exec_ct[i] != last_exec_ct
         if is_new_exec:
             last_exec_ct = exec_ct[i]
+
+            # Cập nhật chu kì (streak) để phát hiện khi nào reset đếm trigger
+            cur_es = exec_state[i]
+            if cur_es == -1:
+                bearish_exec_streak += 1
+                bullish_exec_streak = 0
+                if bearish_exec_streak >= strat.cycle_reset_bars:
+                    cycle_long_count = 0   # sustained bearish -> chu kì long reset
+            elif cur_es == 1:
+                bullish_exec_streak += 1
+                bearish_exec_streak = 0
+                if bullish_exec_streak >= strat.cycle_reset_bars:
+                    cycle_short_count = 0  # sustained bullish -> chu kì short reset
+            else:
+                bearish_exec_streak = 0
+                bullish_exec_streak = 0
+
+            # Đếm trigger trong chu kì hiện tại
+            if tlong[i]:
+                cycle_long_count += 1
+            if tshort[i]:
+                cycle_short_count += 1
+
         n_req = strat.confluence_n
+        min_trigger = 2 if strat.skip_first_signal else 1
 
         if pos is None:
             squeeze_ok = not strat.filter_squeeze or not exec_prev_squeeze[i]
@@ -260,11 +309,15 @@ def run_backtest(df: pd.DataFrame, symbol: str, cfg, label: str = "") -> Backtes
             dbl_ok_short = not strat.require_double_pattern or exec_dbl_top[i]
             sw_l, sw_h = exec_swing_low[i], exec_swing_high[i]
             if (is_new_exec and strat.allow_long and tlong[i]
-                    and clong[i] >= n_req and squeeze_ok and dbl_ok_long):
+                    and clong[i] >= n_req and squeeze_ok and dbl_ok_long
+                    and cycle_long_count >= min_trigger):
                 pending = ("long", 1.0, "entry", sw_l, sw_h)
+                cycle_long_count = 0   # reset sau khi vào lệnh
             elif (is_new_exec and strat.allow_short and tshort[i]
-                    and cshort[i] >= n_req and squeeze_ok and dbl_ok_short):
+                    and cshort[i] >= n_req and squeeze_ok and dbl_ok_short
+                    and cycle_short_count >= min_trigger):
                 pending = ("short", 1.0, "entry", sw_l, sw_h)
+                cycle_short_count = 0  # reset sau khi vào lệnh
         else:
             side = pos["side"]
             # tín hiệu execution ngược chiều (chỉ tính trên nến execution mới)

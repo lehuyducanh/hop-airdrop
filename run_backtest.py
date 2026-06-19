@@ -31,18 +31,25 @@ from src.metrics import compute_metrics, buy_and_hold
 # Định nghĩa 4 variant chiến lược để so sánh
 # ---------------------------------------------------------------------------
 STRATEGY_VARIANTS = [
-    {"name": "1.Base(ATR-stop)",  "use_swing_stop": False, "filter_squeeze": False, "require_double_pattern": False},
-    {"name": "2.SwingStop",       "use_swing_stop": True,  "filter_squeeze": False, "require_double_pattern": False},
-    {"name": "3.Swing+NoSqueeze", "use_swing_stop": True,  "filter_squeeze": True,  "require_double_pattern": False},
-    {"name": "4.Full(DoublePat)", "use_swing_stop": True,  "filter_squeeze": True,  "require_double_pattern": True},
+    # name, use_swing_stop, filter_squeeze, use_fixed_rr, skip_first_signal
+    {"name": "1.Base(ATR-stop)",    "use_swing_stop": False, "filter_squeeze": False,
+     "use_fixed_rr": False, "skip_first": False},
+    {"name": "2.Swing+NoSqueeze",   "use_swing_stop": True,  "filter_squeeze": True,
+     "use_fixed_rr": False, "skip_first": False},
+    {"name": "3.Swing+Squeeze+RR",  "use_swing_stop": True,  "filter_squeeze": True,
+     "use_fixed_rr": True,  "skip_first": False},
+    {"name": "4.Full(RR+Skip1st)", "use_swing_stop": True,  "filter_squeeze": True,
+     "use_fixed_rr": True,  "skip_first": True},
 ]
 
 
 def _apply_variant(cfg, v: dict) -> C.BacktestConfig:
     c = copy.deepcopy(cfg)
     c.risk.use_swing_stop = v["use_swing_stop"]
+    c.risk.use_fixed_rr = v["use_fixed_rr"]
     c.strategy.filter_squeeze = v["filter_squeeze"]
-    c.strategy.require_double_pattern = v["require_double_pattern"]
+    c.strategy.skip_first_signal = v["skip_first"]
+    c.strategy.require_double_pattern = False  # bỏ qua để so sánh tập trung
     return c
 
 
